@@ -17,7 +17,7 @@ struct EntryLoc {
 }
 
 const HEADER_SIZE: usize = 8 + 8 + 4; // 20 bytes fixed header
-struct SegLog {
+pub struct SegLog {
     segs: Vec<*mut u8>, // vector of pointers to segments
     active_seg: usize,
     write_cursor: usize,
@@ -26,9 +26,11 @@ struct SegLog {
     entry_count: usize,           // total number of entries in the log
     seg_layout: Layout,           // layout for segment allocation
 }
+unsafe impl Send for SegLog {}
+unsafe impl Sync for SegLog {}
 
 impl SegLog {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let seg_layout = Layout::from_size_align(SEGMENT_SIZE, SEGMENT_ALIGN).unwrap();
         // pre alloc segmetns
         let mut segs = Vec::with_capacity(MAX_SEGMENTS);
@@ -50,22 +52,22 @@ impl SegLog {
         }
     }
 
-    fn allocate_seg(&mut self) -> Result<(), &'static str> {
+    pub fn allocate_seg(&mut self) -> Result<(), LogError> {
         if self.segs.len() >= MAX_SEGMENTS {
-            return Err("Maximum segments reached");
+            return Err(LogError::MaxSegmentsReached);
         }
         let ptr = unsafe { alloc_zeroed(self.seg_layout) };
         if ptr.is_null() {
-            return Err("Failed to allocate memory for segment");
+            return Err(LogError::AllocationFailed);
         }
         self.segs.push(ptr);
         Ok(())
     }
 
-    fn append(&mut self, timestamp_ms: u64, payload: &[u8]) -> Result<u64, &'static str> {
+    pub fn append(&mut self, timestamp: u64, payload: &[u8]) -> Result<u64, LogError> {
         let total_entry_size = HEADER_SIZE + payload.len();
         if total_entry_size > SEGMENT_SIZE {
-            return Err("Entry size exceeds segment size");
+            return Err(LogError::EntryTooLarge);
         }
         // check if current segment has enough space, and if not mark as full and move to next segment //TODO: use this segment free space later by implementing a page map for each segment
         if self.write_cursor + total_entry_size > SEGMENT_SIZE {
@@ -81,7 +83,7 @@ impl SegLog {
         unsafe {
             let id_bytes = entry_id.to_le_bytes();
             ptr::copy_nonoverlapping(id_bytes.as_ptr(), dst, 8);
-            let ts_bytes = timestamp_ms.to_le_bytes();
+            let ts_bytes = timestamp.to_le_bytes();
             ptr::copy_nonoverlapping(ts_bytes.as_ptr(), dst.add(8), 8);
             let len_bytes = (payload.len() as u32).to_le_bytes();
             ptr::copy_nonoverlapping(len_bytes.as_ptr(), dst.add(16), 4);
@@ -103,8 +105,8 @@ impl SegLog {
         Ok(entry_id)
     }
 
-    fn read(&self, entry_id: u64) -> Result<(u64, u64, Vec<u8>), &'static str> {
-        let loc = self.idx.get(&entry_id).ok_or("Entry ID not found")?;
+    pub fn read(&self, entry_id: u64) -> Result<(u64, u64, Vec<u8>), LogError> {
+        let loc = self.idx.get(&entry_id).ok_or(LogError::EntryNotFound)?;
         let base: *const u8 = self.segs[loc.segment_idx];
         let src: *const u8 = unsafe { base.add(loc.offset) };
         unsafe {
@@ -125,10 +127,10 @@ impl SegLog {
             Ok((id, timestamp, payload))
         }
     }
-    fn read_range(&self, start_id: u64, end_id: u64) -> Vec<(u64, u64, Vec<u8>)> {
+    pub fn read_range(&self, start: u64, end: u64) -> Vec<(u64, u64, Vec<u8>)> {
         let mut results = Vec::new();
 
-        for (&id, _loc) in self.idx.range(start_id..=end_id) {
+        for (&id, _loc) in self.idx.range(start..=end) {
             if let Ok(entry) = self.read(id) {
                 results.push(entry);
             }
@@ -137,7 +139,7 @@ impl SegLog {
         results
     }
 
-    fn trim(&mut self, cutoff_id: u64) {
+    pub fn trim(&mut self, cutoff_id: u64) {
         let to_remove: Vec<u64> = self.idx.range(..cutoff_id).map(|(&id, _)| id).collect();
 
         for id in &to_remove {
@@ -156,23 +158,26 @@ impl SegLog {
         }
     }
 
-    fn get_raw_entry_slice(&self, entry_id: u64) -> Result<&[u8], &'static str> {
+    pub fn get_raw_entry_slice(&self, entry_id: u64) -> Result<&[u8], &'static str> {
         let loc = self.idx.get(&entry_id).ok_or("entry not found")?;
         let base: *const u8 = self.segs[loc.segment_idx];
 
         unsafe { Ok(std::slice::from_raw_parts(base.add(loc.offset), loc.len)) }
     }
-    fn total_entries(&self) -> u64 {
+    pub fn total_entries(&self) -> u64 {
         self.entry_count as u64
     }
 
-    fn total_segments(&self) -> usize {
+    pub fn total_segments(&self) -> usize {
         self.segs.len()
     }
 
-    fn active_segment_usage(&self) -> f64 {
+    pub fn active_segment_usage(&self) -> f64 {
         // return percentage of active segment used
         (self.write_cursor as f64 / SEGMENT_SIZE as f64) * 100.0
+    }
+    pub fn next_id(&self) -> u64 {
+        self.next_id
     }
 }
 impl Drop for SegLog {
@@ -341,5 +346,25 @@ mod tests {
         }
         log.trim(200);
         drop(log);
+    }
+}
+
+#[derive(Debug)]
+pub enum LogError {
+    EntryTooLarge,
+    SegmentLimitReached,
+    EntryNotFound,
+    AllocationFailed,
+    MaxSegmentsReached,
+}
+impl std::fmt::Display for LogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogError::EntryTooLarge => write!(f, "entry exceeds segment capacity"),
+            LogError::SegmentLimitReached => write!(f, "max segment count reached"),
+            LogError::EntryNotFound => write!(f, "entry not found"),
+            LogError::AllocationFailed => write!(f, "failed to allocate memory for segment"),
+            LogError::MaxSegmentsReached => write!(f, "maximum segments reached"),
+        }
     }
 }

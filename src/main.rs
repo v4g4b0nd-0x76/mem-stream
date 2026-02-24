@@ -1,4 +1,5 @@
-mod seg_log;
+mod groups;
+mod seg_log;   
 fn main() {
     println!("Hello, world!");
 }
