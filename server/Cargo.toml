@@ -1,0 +1,10 @@
+[package]
+name = "mem-stream-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1.11.1"
+futures = "0.3.32"
+tokio = "1.49.0"
+tokio-util = { version = "0.7.18", features = ["codec"] }

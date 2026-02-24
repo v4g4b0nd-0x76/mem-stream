@@ -1,5 +1,7 @@
+mod codec;
 mod groups;
-mod seg_log;   
+mod proto;
+mod seg_log;
 fn main() {
     println!("Hello, world!");
 }
