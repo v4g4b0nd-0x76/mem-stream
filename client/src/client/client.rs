@@ -1,11 +1,10 @@
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 pub struct StreamClient {
     stream: TcpStream,
+    #[allow(dead_code)]
     read_buf: BytesMut,
 }
 
@@ -19,10 +18,19 @@ impl StreamClient {
         })
     }
 
+    pub fn is_alive(&self) -> bool {
+        match self.stream.try_read(&mut [0u8; 0]) {
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+            Ok(0) => false,
+            Err(_) => false,
+            Ok(_) => true,
+        }
+    }
+
     async fn send_recv(&mut self, frame: &[u8]) -> anyhow::Result<Vec<u8>> {
         let start = std::time::Instant::now();
         tracing::info!("sending frame of length {}", frame.len());
-            
+
         let body_len = frame.len() as u32;
         self.stream.write_all(&body_len.to_le_bytes()).await?;
         self.stream.write_all(frame).await?;
@@ -178,8 +186,7 @@ impl StreamClient {
             let mut groups = Vec::with_capacity(count);
             let mut pos = 5;
             for _ in 0..count {
-                let name_len =
-                    u16::from_le_bytes(resp[pos..pos + 2].try_into().unwrap()) as usize;
+                let name_len = u16::from_le_bytes(resp[pos..pos + 2].try_into().unwrap()) as usize;
                 pos += 2;
                 let name = String::from_utf8_lossy(&resp[pos..pos + name_len]).to_string();
                 pos += name_len;

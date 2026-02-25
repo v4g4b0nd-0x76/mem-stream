@@ -1,4 +1,4 @@
-use std::{any, env, sync::Arc};
+use std::{ env, sync::Arc};
 
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let server_addr = env::var("SERVER_ADDR").unwrap_or_else(|_| "localhost:8080".to_string());
+    let server_addr = env::var("SERVER_ADDR").unwrap_or_else(|_| "localhost:9090".to_string());
     let pool_size = env::var("POOL_SIZE").unwrap_or_else(|_| "10".to_string()).parse().unwrap_or(10);
     let http_addr = env::var("HTTP_ADDR").unwrap_or_else(|_| "localhost:8000".to_string());
 

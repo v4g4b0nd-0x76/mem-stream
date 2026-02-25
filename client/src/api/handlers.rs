@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{Json, extract::{Path, State}, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::{Path,  State}, http::StatusCode, response::IntoResponse};
 use base64::Engine;
-use chrono::DateTime;
+
 use serde::{Deserialize};
 use serde_json::json;
 
@@ -82,7 +82,7 @@ pub async fn add_entry(State(pool): State<Arc<ClientPool>>, Path(name):Path<Stri
     let payload = encode_payload_b64(&req.payload);
     let timestamp = chrono::Utc::now().timestamp_millis() as u64;
     match conn.conn().add(&name, timestamp, &payload).await{
-        Ok(Ok((id))) => (StatusCode::OK, Json(json!({"status": "entry added", "id": id}))).into_response(),
+        Ok(Ok(id)) => (StatusCode::OK, Json(json!({"status": "entry added", "id": id}))).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -123,12 +123,16 @@ pub async fn read_entry(State(pool): State<Arc<ClientPool>>, Path((name, id)):Pa
     }
 }
 
-pub async fn read_range_entries(State(pool): State<Arc<ClientPool>>, Path((name, start_id, end_id)):Path<(String, u64, u64)>) -> impl IntoResponse {
+pub async fn read_range_entries(
+    State(pool): State<Arc<ClientPool>>,
+    Path((name, start_id , end_id)): Path<(String , u64, u64)>,
+    
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     };
-    match conn.conn().read_range(&name, start_id, end_id).await{
+    match conn.conn().read_range(&name, start_id, end_id).await {
         Ok(Ok(entries)) => {
             let entries_decoded: Vec<_> = entries.into_iter().map(|(id, timestamp, payload)| {
                 let payload_decoded = decode_payload_b64(&payload);
@@ -141,7 +145,7 @@ pub async fn read_range_entries(State(pool): State<Arc<ClientPool>>, Path((name,
     }
 }
 
-pub async fn drop_entires(State(pool):State<Arc<ClientPool>> , Path((group,upto_id)): Path<(String, u64)>) -> impl IntoResponse {
+pub async fn drop_entries(State(pool):State<Arc<ClientPool>> , Path((group,upto_id)): Path<(String, u64)>) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),

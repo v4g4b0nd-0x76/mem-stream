@@ -16,8 +16,8 @@ impl Server {
             group_manager: manager,
         }
     }
-    pub async fn start(&self) -> anyhow::Result<()> {
-        let ln = TcpListener::bind("localhost:8080").await?;
+    pub async fn start(&self, addr: &str) -> anyhow::Result<()> {
+        let ln = TcpListener::bind(addr).await?;
         loop {
             let (socket, peer) = ln.accept().await?;
             println!("New connection from {}", peer);

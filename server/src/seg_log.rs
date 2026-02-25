@@ -157,6 +157,7 @@ impl SegLog {
             }
         }
     }
+    #[allow(dead_code)]
 
     pub fn get_raw_entry_slice(&self, entry_id: u64) -> Result<&[u8], &'static str> {
         let loc = self.idx.get(&entry_id).ok_or("entry not found")?;
@@ -171,6 +172,7 @@ impl SegLog {
     pub fn total_segments(&self) -> usize {
         self.segs.len()
     }
+    #[allow(dead_code)]
 
     pub fn active_segment_usage(&self) -> f64 {
         // return percentage of active segment used
@@ -350,6 +352,7 @@ mod tests {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum LogError {
     EntryTooLarge,
     SegmentLimitReached,

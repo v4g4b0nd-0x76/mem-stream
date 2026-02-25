@@ -8,7 +8,9 @@ mod server;
 #[tokio::main]
 async fn main() {
     let srv : Server = Server::new();
-    if let Err(e) = srv.start().await {
+    let addr = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "localhost:9090".to_string());
+     println!("Starting server on {addr}...");
+    if let Err(e) = srv.start(&addr).await {
         eprintln!("Server error: {}", e);
     }
 }
