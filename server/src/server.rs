@@ -1,7 +1,6 @@
 use crate::codec::LengthPrefixCodec;
 use crate::groups::{GroupError, GroupManager, GroupStats};
 use crate::proto::{self, Command, ParseError, ResponseBuilder};
-use anyhow::Ok;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::{net::TcpListener, sync::RwLock};

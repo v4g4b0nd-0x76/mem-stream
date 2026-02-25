@@ -204,9 +204,6 @@ impl ResponseBuilder {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.buf.clear();
-    }
 
     pub fn ok_empty(&mut self) -> &[u8] {
         self.buf.clear();
