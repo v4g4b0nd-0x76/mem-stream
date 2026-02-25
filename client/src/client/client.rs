@@ -1,6 +1,8 @@
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 pub struct StreamClient {
     stream: TcpStream,
@@ -18,6 +20,9 @@ impl StreamClient {
     }
 
     async fn send_recv(&mut self, frame: &[u8]) -> anyhow::Result<Vec<u8>> {
+        let start = std::time::Instant::now();
+        tracing::info!("sending frame of length {}", frame.len());
+            
         let body_len = frame.len() as u32;
         self.stream.write_all(&body_len.to_le_bytes()).await?;
         self.stream.write_all(frame).await?;
@@ -28,6 +33,8 @@ impl StreamClient {
         let resp_len = u32::from_le_bytes(len_buf) as usize;
         let mut resp = vec![0u8; resp_len];
         self.stream.read_exact(&mut resp).await?;
+        let duration = start.elapsed();
+        tracing::info!("received frame of length {} in {:?}", resp_len, duration);
 
         Ok(resp)
     }
