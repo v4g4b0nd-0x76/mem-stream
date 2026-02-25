@@ -30,7 +30,7 @@ pub struct GroupManager {
 }
 
 impl GroupManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
         GroupManager {
             groups: HashMap::new(),
         }
