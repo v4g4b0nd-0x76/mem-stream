@@ -1,3 +1,0 @@
-[workspace]
-members = ["server", "client", "bench"]
-resolver = "3"

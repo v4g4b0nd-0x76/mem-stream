@@ -10,8 +10,8 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new() -> Self {
-        let manager = Arc::new(RwLock::new(GroupManager::new()));
+    pub async fn new() -> Self {
+        let manager = Arc::new(RwLock::new(GroupManager::new().await));
         Server {
             group_manager: manager,
         }
@@ -51,11 +51,8 @@ impl Server {
                 eprintln!("[server] connection closed: {}", peer);
             });
         }
-        
     }
 }
-
-
 
 async fn handle_command(
     manager: &Arc<RwLock<GroupManager>>,
@@ -65,44 +62,58 @@ async fn handle_command(
     match cmd {
         Command::CreateGroup { name } => {
             let mut mgr = manager.write().await;
-            match mgr.create_group(name) {
+            match mgr.create_group(name).await {
                 Result::<(), GroupError>::Ok(()) => rb.ok_empty().to_vec(),
                 Result::<(), GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
             }
         }
         Command::DropGroup { name } => {
             let mut mgr = manager.write().await;
-            match mgr.drop_group(name) {
+            match mgr.drop_group(name).await {
                 Result::<(), GroupError>::Ok(()) => rb.ok_empty().to_vec(),
                 Result::<(), GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
             }
         }
-        Command::Add { group, timestamp, payload } => {
+        Command::Add {
+            group,
+            timestamp,
+            payload,
+        } => {
             let mut mgr = manager.write().await;
-            match mgr.add(group, timestamp, payload) {
+            match mgr.add(group, timestamp, payload).await {
                 Result::<u64, GroupError>::Ok(id) => rb.ok_u64(id).to_vec(),
                 Result::<u64, GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
             }
         }
         Command::AddRange { group, entries } => {
             let mut mgr = manager.write().await;
-            match mgr.add_range(group, &entries) {
-                Result::<(u64, u64), GroupError>::Ok((first, last)) => rb.ok_u64_pair(first, last).to_vec(),
+            match mgr.add_range(group, &entries).await {
+                Result::<(u64, u64), GroupError>::Ok((first, last)) => {
+                    rb.ok_u64_pair(first, last).to_vec()
+                }
                 Result::<(u64, u64), GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
             }
         }
         Command::Read { group, id } => {
             let mgr = manager.read().await;
             match mgr.read(group, id) {
-                Result::<(u64, u64, Vec<u8>), GroupError>::Ok((entry_id, ts, payload)) => rb.ok_entry(entry_id, ts, &payload).to_vec(),
-                Result::<(u64, u64, Vec<u8>), GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
+                Result::<(u64, u64, Vec<u8>), GroupError>::Ok((entry_id, ts, payload)) => {
+                    rb.ok_entry(entry_id, ts, &payload).to_vec()
+                }
+                Result::<(u64, u64, Vec<u8>), GroupError>::Err(e) => {
+                    rb.err(&e.to_string()).to_vec()
+                }
             }
         }
         Command::ReadRange { group, start, end } => {
             let mgr = manager.read().await;
             match mgr.read_range(group, start, end) {
-                Result::<Vec<(u64, u64, Vec<u8>)>, GroupError>::Ok(entries) => rb.ok_entries(&entries).to_vec(),
-                Result::<Vec<(u64, u64, Vec<u8>)>, GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
+                Result::<Vec<(u64, u64, Vec<u8>)>, GroupError>::Ok(entries) => {
+                    rb.ok_entries(&entries).to_vec()
+                }
+                Result::<Vec<(u64, u64, Vec<u8>)>, GroupError>::Err(e) => {
+                    rb.err(&e.to_string()).to_vec()
+                }
             }
         }
         Command::Remove { group, up_to_id } => {
@@ -120,7 +131,9 @@ async fn handle_command(
         Command::GroupStats { group } => {
             let mgr = manager.read().await;
             match mgr.group_stats(group) {
-                Result::<GroupStats, GroupError>::Ok(stats) => rb.ok_stats(stats.total_entries, stats.total_segments, stats.next_id).to_vec(),
+                Result::<GroupStats, GroupError>::Ok(stats) => rb
+                    .ok_stats(stats.total_entries, stats.total_segments, stats.next_id)
+                    .to_vec(),
                 Result::<GroupStats, GroupError>::Err(e) => rb.err(&e.to_string()).to_vec(),
             }
         }

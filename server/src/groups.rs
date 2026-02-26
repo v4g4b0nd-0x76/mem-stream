@@ -1,5 +1,8 @@
+use futures::TryFutureExt;
+use tokio::fs::File;
+
 use crate::seg_log::{LogError, SegLog};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 #[derive(Debug)]
 pub enum GroupError {
     GroupNotFound(String),
@@ -30,34 +33,49 @@ pub struct GroupManager {
 }
 
 impl GroupManager {
-    pub fn new() -> Self {
-        GroupManager {
+    pub async fn new() -> Self {
+        let mut manager = GroupManager {
             groups: HashMap::new(),
-        }
+        };
+        manager.load_snapshot().await.unwrap_or_else(|e| {
+            eprintln!("Failed to load snapshot: {}", e);
+        });
+        manager
     }
-    pub fn create_group(&mut self, name: &str) -> Result<(), GroupError> {
+    pub async fn create_group(&mut self, name: &str) -> Result<(), GroupError> {
         if self.groups.contains_key(name) {
             return Err(GroupError::GroupAlreadyExists(name.to_string()));
         }
-        let log = SegLog::new();
+        let log = SegLog::new(name.to_string());
         self.groups.insert(name.to_string(), log);
+        self.snapshot_group(name)
+            .await
+            .expect(&format!("failed to snapshot group '{}'", name));
         Ok(())
     }
-    pub fn drop_group(&mut self, name: &str) -> Result<(), GroupError> {
+    pub async fn drop_group(&mut self, name: &str) -> Result<(), GroupError> {
         if self.groups.remove(name).is_none() {
             return Err(GroupError::GroupNotFound(name.to_string()));
         }
+        self.remove_group_snapshot(name)
+            .await
+            .expect(&format!("failed to remove snapshot for group '{}'", name));
         Ok(())
     }
-    pub fn add(&mut self, group: &str, timestamp: u64, payload: &[u8]) -> Result<u64, GroupError> {
+    pub async fn add(
+        &mut self,
+        group: &str,
+        timestamp: u64,
+        payload: &[u8],
+    ) -> Result<u64, GroupError> {
         let log = self
             .groups
             .get_mut(group)
             .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
-        Ok(log.append(timestamp, payload)?)
+        Ok(log.append(timestamp, payload).await?)
     }
 
-    pub fn add_range(
+    pub async fn add_range(
         &mut self,
         group: &str,
         entries: &[(u64, &[u8])], // (timestamp, payload)
@@ -71,10 +89,10 @@ impl GroupManager {
             return Err(GroupError::LogError(LogError::EntryNotFound));
         }
 
-        let first_id = log.append(entries[0].0, entries[0].1)?;
+        let first_id = log.append(entries[0].0, entries[0].1).await?;
         let mut last_id = first_id;
         for &(ts, payload) in &entries[1..] {
-            last_id = log.append(ts, payload)?;
+            last_id = log.append(ts, payload).await?;
         }
         Ok((first_id, last_id))
     }
@@ -123,23 +141,100 @@ impl GroupManager {
             next_id: log.next_id(),
         })
     }
+    async fn snapshot_group(&self, group: &str) -> anyhow::Result<()> {
+        // check if group_names file not exist create it
+        if !tokio::fs::metadata(PathBuf::from("snapshots/group_names"))
+            .await
+            .is_ok()
+        {
+            tokio::fs::create_dir_all("snapshots").await?;
+            File::create(PathBuf::from("snapshots/group_names")).await?;
+        }
+        // if group is already listed in group_names file, do nothing
+        let mut log_file = File::open(PathBuf::from("snapshots/group_names")).await?;
+        let mut contents = String::new();
+        use tokio::io::AsyncReadExt;
+        log_file.read_to_string(&mut contents).await?;
+        let mut group_names: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
+        if group_names.contains(&group.to_string()) {
+            return Ok(());
+        }
+        if !group_names.contains(&group.to_string()) {
+            group_names.push(group.to_string());
+            let new_contents = group_names.join("\n");
+            use tokio::io::AsyncWriteExt;
+            let mut log_file = File::create(PathBuf::from("snapshots/group_names")).await?;
+            log_file.write_all(new_contents.as_bytes()).await?;
+        }
+        Ok(())
+    }
+    async fn load_group_names(&self) -> anyhow::Result<Vec<String>> {
+        let mut log_file = File::open(PathBuf::from("snapshots/group_names")).await?;
+        let mut contents = String::new();
+        use tokio::io::AsyncReadExt;
+        log_file.read_to_string(&mut contents).await?;
+        let group_names: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
+        Ok(group_names)
+    }
+    async fn remove_group_snapshot(&self, group: &str) -> anyhow::Result<()> {
+        // if group_names file not exist, do nothing
+        if !tokio::fs::metadata(PathBuf::from("snapshots/group_names"))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let mut log_file = File::open(PathBuf::from("snapshots/group_names")).await?;
+        let mut contents = String::new();
+        use tokio::io::AsyncReadExt;
+        log_file.read_to_string(&mut contents).await?;
+        let group_names: Vec<String> = contents
+            .lines()
+            .map(|s| s.to_string())
+            .filter(|s| s != group)
+            .collect();
+        let new_contents = group_names.join("\n");
+        use tokio::io::AsyncWriteExt;
+        let mut log_file = File::create(PathBuf::from("snapshots/group_names")).await?;
+        log_file.write_all(new_contents.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn load_snapshot(&mut self) -> anyhow::Result<()> {
+        // load snapshot for each group
+        let group_names = self.load_group_names().await?;
+        for grp in group_names {
+            let grp = grp.clone();
+            let log = self.groups.get_mut(&grp).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "group '{}' listed in snapshot but not found in manager",
+                    grp
+                )
+            })?;
+            log.load_snapshot()
+                .map_err(|e| anyhow::anyhow!("failed to load snapshot for group '{}': {}", grp, e))
+                .await?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_full_cycle() {
-        let mut m = GroupManager::new();
+    #[tokio::test]
+    async fn test_full_cycle() {
+        let mut m = GroupManager::new().await;
 
-        assert!(m.create_group("g1").is_ok());
-        assert!(m.create_group("g2").is_ok());
-        assert!(m.create_group("g1").is_err());
+        assert!(m.create_group("g1").await.is_ok());
+        assert!(m.create_group("g2").await.is_ok());
+        assert!(m.create_group("g1").await.is_err());
 
-        let a1 = m.add("g1", 100, b"aaa").unwrap();
-        let a2 = m.add("g1", 200, b"bbb").unwrap();
-        let a3 = m.add("g1", 300, b"ccc").unwrap();
+        let a1 = m.add("g1", 100, b"aaa").await.unwrap();
+        let a2 = m.add("g1", 200, b"bbb").await.unwrap();
+        let a3 = m.add("g1", 300, b"ccc").await.unwrap();
         assert_eq!(a1, 1);
         assert_eq!(a2, 2);
         assert_eq!(a3, 3);
@@ -150,11 +245,12 @@ mod tests {
         assert_eq!(rdata, b"bbb");
 
         assert!(m.read("g1", 999).is_err());
-        assert!(m.add("ghost", 0, b"x").is_err());
+        assert!(m.add("ghost", 0, b"x").await.is_err());
         assert!(m.read("ghost", 1).is_err());
 
         let (first, last) = m
             .add_range("g1", &[(400, b"ddd"), (500, b"eee"), (600, b"fff")])
+            .await
             .unwrap();
         assert_eq!(first, 4);
         assert_eq!(last, 6);
@@ -166,7 +262,7 @@ mod tests {
 
         assert!(m.read_range("g1", 900, 999).unwrap().is_empty());
 
-        let b1 = m.add("g2", 10, b"isolated").unwrap();
+        let b1 = m.add("g2", 10, b"isolated").await.unwrap();
         assert_eq!(b1, 1);
         let (_, _, d) = m.read("g2", 1).unwrap();
         assert_eq!(d, b"isolated");
@@ -189,12 +285,12 @@ mod tests {
         groups.sort();
         assert_eq!(groups, vec!["g1", "g2"]);
 
-        m.drop_group("g2").unwrap();
-        assert!(m.drop_group("g2").is_err());
+        m.drop_group("g2").await.unwrap();
+        assert!(m.drop_group("g2").await.is_err());
         assert!(m.read("g2", 1).is_err());
         assert_eq!(m.list_groups().len(), 1);
 
-        let post = m.add("g1", 700, b"after-trim").unwrap();
+        let post = m.add("g1", 700, b"after-trim").await.unwrap();
         assert_eq!(post, 7);
         let (_, _, pd) = m.read("g1", 7).unwrap();
         assert_eq!(pd, b"after-trim");

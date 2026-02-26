@@ -1,7 +1,14 @@
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     collections::BTreeMap,
+    path::PathBuf,
     ptr,
+};
+
+use serde_json::json;
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
 };
 
 const SEGMENT_SIZE: usize = 64 * 1024; // 64KB per segment for better cpu cache
@@ -18,6 +25,7 @@ struct EntryLoc {
 
 const HEADER_SIZE: usize = 8 + 8 + 4; // 20 bytes fixed header
 pub struct SegLog {
+    identifier: String,
     segs: Vec<*mut u8>, // vector of pointers to segments
     active_seg: usize,
     write_cursor: usize,
@@ -25,12 +33,19 @@ pub struct SegLog {
     next_id: u64,                 // next entry id to assign
     entry_count: usize,           // total number of entries in the log
     seg_layout: Layout,           // layout for segment allocation
+    lock_write: tokio::sync::Mutex<()>, // mutex to serialize writes
 }
 unsafe impl Send for SegLog {}
 unsafe impl Sync for SegLog {}
-
+#[derive(bitcode::Encode, bitcode::Decode, PartialEq, Debug)]
+struct Entry {
+    id: u64,          // 8 bytes
+    timestamp: u64,   // 8 bytes
+    len: usize,       // 4 bytes
+    payload: Vec<u8>, // variable length
+}
 impl SegLog {
-    pub fn new() -> Self {
+    pub fn new(identifier: String) -> Self {
         let seg_layout = Layout::from_size_align(SEGMENT_SIZE, SEGMENT_ALIGN).unwrap();
         // pre alloc segmetns
         let mut segs = Vec::with_capacity(MAX_SEGMENTS);
@@ -42,17 +57,19 @@ impl SegLog {
             segs.push(ptr);
         }
         SegLog {
+            identifier,
             segs,
             active_seg: 0,
             write_cursor: 0,
             seg_layout,
             idx: BTreeMap::new(),
+            lock_write: tokio::sync::Mutex::new(()),
             next_id: 1,
             entry_count: 0,
         }
     }
 
-    pub fn allocate_seg(&mut self) -> Result<(), LogError> {
+    pub async fn allocate_seg(&mut self) -> Result<(), LogError> {
         if self.segs.len() >= MAX_SEGMENTS {
             return Err(LogError::MaxSegmentsReached);
         }
@@ -61,22 +78,34 @@ impl SegLog {
             return Err(LogError::AllocationFailed);
         }
         self.segs.push(ptr);
+        self.snapshot()
+            .await
+            .map_err(|e| LogError::SnapshotFailed(e.to_string()))?;
         Ok(())
     }
 
-    pub fn append(&mut self, timestamp: u64, payload: &[u8]) -> Result<u64, LogError> {
+    pub async fn append(&mut self, timestamp: u64, payload: &[u8]) -> Result<u64, LogError> {
         let total_entry_size = HEADER_SIZE + payload.len();
         if total_entry_size > SEGMENT_SIZE {
             return Err(LogError::EntryTooLarge);
         }
-        // check if current segment has enough space, and if not mark as full and move to next segment //TODO: use this segment free space later by implementing a page map for each segment
+
+        // If we need a new segment, allocate it while holding the lock
         if self.write_cursor + total_entry_size > SEGMENT_SIZE {
             self.active_seg += 1;
             self.write_cursor = 0;
             if self.active_seg >= self.segs.len() {
-                self.allocate_seg()?;
+                // If you need to run snapshot before allocating, do it here
+                // Example: self.snapshot("auto").await.ok();
+                self.allocate_seg().await?;
             }
         }
+        // Acquire the lock before any mutable borrow
+        let lock = match self.lock_write.try_lock() {
+            Ok(l) => l,
+            Err(_) => return Err(LogError::WriteLockUnavailable),
+        };
+
         let entry_id = self.next_id;
         let base: *mut u8 = self.segs[self.active_seg];
         let dst: *mut u8 = unsafe { base.add(self.write_cursor) };
@@ -102,7 +131,57 @@ impl SegLog {
         self.write_cursor += total_entry_size;
         self.next_id += 1;
         self.entry_count += 1;
+        drop(lock);
         Ok(entry_id)
+    }
+    pub async fn append_with_id(
+        &mut self,
+        id: u64,
+        timestamp: u64,
+        data: &[u8],
+    ) -> Result<u64, LogError> {
+        let total_entry_size = HEADER_SIZE + data.len();
+        if total_entry_size > SEGMENT_SIZE {
+            return Err(LogError::EntryTooLarge);
+        }
+
+        if self.write_cursor + total_entry_size > SEGMENT_SIZE {
+            self.active_seg += 1;
+            self.write_cursor = 0;
+            if self.active_seg >= self.segs.len() {
+                self.allocate_seg().await?;
+            }
+        }
+
+        let _lock = self.lock_write.lock().await;
+
+        let base: *mut u8 = self.segs[self.active_seg];
+        let dst: *mut u8 = unsafe { base.add(self.write_cursor) };
+        unsafe {
+            ptr::copy_nonoverlapping(id.to_le_bytes().as_ptr(), dst, 8);
+            ptr::copy_nonoverlapping(timestamp.to_le_bytes().as_ptr(), dst.add(8), 8);
+            ptr::copy_nonoverlapping((data.len() as u32).to_le_bytes().as_ptr(), dst.add(16), 4);
+            if !data.is_empty() {
+                ptr::copy_nonoverlapping(data.as_ptr(), dst.add(HEADER_SIZE), data.len());
+            }
+        }
+
+        self.idx.insert(
+            id,
+            EntryLoc {
+                segment_idx: self.active_seg,
+                offset: self.write_cursor,
+                len: total_entry_size,
+            },
+        );
+
+        self.write_cursor += total_entry_size;
+        self.entry_count += 1;
+        if id >= self.next_id {
+            self.next_id = id + 1;
+        }
+
+        Ok(id)
     }
 
     pub fn read(&self, entry_id: u64) -> Result<(u64, u64, Vec<u8>), LogError> {
@@ -181,6 +260,107 @@ impl SegLog {
     pub fn next_id(&self) -> u64 {
         self.next_id
     }
+
+    pub async fn snapshot(&self) -> anyhow::Result<()> {
+        let _lock = self.lock_write.lock().await;
+        let grp = self.identifier.as_str();
+        let ts = chrono::Utc::now().timestamp_millis();
+        let dir = "snapshots";
+        let _ = fs::create_dir_all(dir).await;
+        let pth = PathBuf::from(format!("{}/{}_snapshot_{}.bin", dir, grp, ts));
+        let meta_pth = PathBuf::from(format!("{}/{}_snapshot_{}.meta.json", dir, grp, ts));
+
+        let mut entries: Vec<Entry> = Vec::with_capacity(self.idx.len());
+        for (&id, _) in self.idx.iter() {
+            if let Ok((_, timestamp, payload)) = self.read(id) {
+                entries.push(Entry {
+                    id,
+                    timestamp,
+                    len: payload.len(),
+                    payload,
+                });
+            }
+        }
+
+        let buf: Vec<u8> = bitcode::encode(&entries);
+        let mut snapshot_file = File::create(&pth).await?;
+        snapshot_file.write_all(&buf).await?;
+        snapshot_file.sync_all().await?;
+
+        let meta = json!({
+            "group": grp,
+            "timestamp": ts,
+            "total_segments": self.segs.len(),
+            "completed": true,
+        });
+        let mut meta_file = File::create(&meta_pth).await?;
+        meta_file.write_all(meta.to_string().as_bytes()).await?;
+        meta_file.sync_all().await?;
+
+        Ok(())
+    }
+
+    pub async fn load_snapshot(&mut self) -> anyhow::Result<()> {
+        let grp = self.identifier.as_str();
+        let dir = "snapshots";
+        let _ = fs::create_dir_all(dir).await;
+
+        let mut read_dir = fs::read_dir(dir).await?;
+        let mut timestamps: Vec<i64> = Vec::new();
+
+        while let Some(entry) = read_dir.next_entry().await? {
+            let name = entry.file_name();
+            let name_str = match name.to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if !name_str.starts_with(&format!("{}_snapshot_", grp))
+                || !name_str.ends_with(".meta.json")
+            {
+                continue;
+            }
+            if let Some(ts) = name_str
+                .strip_prefix(&format!("{}_snapshot_", grp))
+                .and_then(|s| s.strip_suffix(".meta.json"))
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                timestamps.push(ts);
+            }
+        }
+
+        timestamps.sort_unstable_by(|a, b| b.cmp(a));
+
+        let mut snapshot_pth: Option<PathBuf> = None;
+        for ts in timestamps {
+            let meta_pth = PathBuf::from(format!("{}/{}_snapshot_{}.meta.json", dir, grp, ts));
+            if let Ok(content) = fs::read_to_string(&meta_pth).await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if json.get("completed").and_then(|v| v.as_bool()) == Some(true) {
+                        snapshot_pth = Some(PathBuf::from(format!(
+                            "{}/{}_snapshot_{}.bin",
+                            dir, grp, ts
+                        )));
+                        break;
+                    }
+                }
+            }
+        }
+
+        let snapshot_pth = match snapshot_pth {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        let data = tokio::fs::read(&snapshot_pth).await?;
+        let entries: Vec<Entry> = bitcode::decode(&data)?;
+        for entry in entries {
+            self.append_with_id(entry.id, entry.timestamp, &entry.payload)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to load entry id {}: {}", entry.id, e))?;
+        }
+
+        Ok(())
+    }
 }
 impl Drop for SegLog {
     fn drop(&mut self) {
@@ -197,9 +377,9 @@ impl Drop for SegLog {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_full_lifecycle() {
-        let mut log = SegLog::new();
+    #[tokio::test]
+    async fn test_full_lifecycle() {
+        let mut log = SegLog::new("test_group".to_string());
 
         let entry_count = 1000u64;
         for i in 0..entry_count {
@@ -210,7 +390,7 @@ mod tests {
                 20 + (i % 15),
                 i % 100
             );
-            log.append(ts, payload.as_bytes()).unwrap();
+            log.append(ts, payload.as_bytes()).await.unwrap();
         }
         assert_eq!(log.total_entries(), entry_count);
 
@@ -244,7 +424,7 @@ mod tests {
             "entry at cutoff boundary must survive"
         );
 
-        let new_id = log.append(9999999999999, b"post-trim-event").unwrap();
+        let new_id = log.append(9999999999999, b"post-trim-event").await.unwrap();
         assert_eq!(
             new_id,
             entry_count + 1,
@@ -252,11 +432,45 @@ mod tests {
         );
         let (_, _, data) = log.read(new_id).unwrap();
         assert_eq!(data, b"post-trim-event");
+
+        // --- Snapshot save/load test ---
+        // Save snapshot
+        log.snapshot().await.expect("snapshot save failed");
+
+        // Create a new log and load snapshot
+        let mut loaded_log = SegLog::new("test_group".to_string());
+        loaded_log
+            .load_snapshot()
+            .await
+            .map_err(|e| eprintln!("snapshot load failed: {}", e))
+            .expect("snapshot load failed");
+
+        // Check that loaded log has the same number of entries
+        assert_eq!(loaded_log.total_entries(), log.total_entries());
+
+        // Check a few entries for correctness
+        for &id in &[501u64, 600, 750, new_id] {
+            let (orig_id, orig_ts, orig_data) = log.read(id).unwrap();
+            let (loaded_id, loaded_ts, loaded_data) = loaded_log.read(id).unwrap();
+            assert_eq!(orig_id, loaded_id, "id mismatch after snapshot load");
+            assert_eq!(orig_ts, loaded_ts, "timestamp mismatch after snapshot load");
+            assert_eq!(
+                orig_data, loaded_data,
+                "payload mismatch after snapshot load"
+            );
+        }
+
+        // Check that trimmed entries are still gone after load
+        assert!(loaded_log.read(1).is_err());
+        assert!(loaded_log.read(500).is_err());
+        assert!(loaded_log.read(100).is_err());
+        assert!(loaded_log.read(501).is_ok());
+        assert!(loaded_log.read(new_id).is_ok());
     }
 
-    #[test]
-    fn test_segment_boundary_integrity() {
-        let mut log = SegLog::new();
+    #[tokio::test]
+    async fn test_segment_boundary_integrity() {
+        let mut log = SegLog::new("test_group".to_string());
 
         let payload_size = 1000;
         let count = 500u64;
@@ -264,7 +478,7 @@ mod tests {
         for i in 0..count {
             let fill_byte = (i & 0xFF) as u8;
             let payload = vec![fill_byte; payload_size];
-            log.append(i, &payload).unwrap();
+            log.append(i, &payload).await.unwrap();
         }
 
         assert!(
@@ -291,12 +505,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_wire_format_and_zero_copy() {
-        let mut log = SegLog::new();
+    #[tokio::test]
+    async fn test_wire_format_and_zero_copy() {
+        let mut log = SegLog::new("test_group".to_string());
         let ts: u64 = 0xAABB_CCDD_1122_3344;
         let payload = b"wire-fmt";
-        let id = log.append(ts, payload).unwrap();
+        let id = log.append(ts, payload).await.unwrap();
 
         let raw = log.get_raw_entry_slice(id).unwrap();
         assert_eq!(raw.len(), HEADER_SIZE + payload.len());
@@ -314,22 +528,22 @@ mod tests {
         assert_eq!(raw_payload, payload);
     }
 
-    #[test]
-    fn test_edge_cases() {
-        let mut log = SegLog::new();
+    #[tokio::test]
+    async fn test_edge_cases() {
+        let mut log = SegLog::new("test_group".to_string());
 
-        let id1 = log.append(0, b"").unwrap();
+        let id1 = log.append(0, b"").await.unwrap();
         let (_, _, d) = log.read(id1).unwrap();
         assert!(d.is_empty());
 
         let max_payload = vec![0xFFu8; SEGMENT_SIZE - HEADER_SIZE];
-        let id2 = log.append(u64::MAX, &max_payload).unwrap();
+        let id2 = log.append(u64::MAX, &max_payload).await.unwrap();
         let (_, ts, d) = log.read(id2).unwrap();
         assert_eq!(ts, u64::MAX);
         assert_eq!(d.len(), SEGMENT_SIZE - HEADER_SIZE);
 
         let oversized = vec![0u8; SEGMENT_SIZE - HEADER_SIZE + 1];
-        assert!(log.append(1, &oversized).is_err());
+        assert!(log.append(1, &oversized).await.is_err());
 
         assert!(log.read(0).is_err());
         assert!(log.read(9999).is_err());
@@ -338,13 +552,13 @@ mod tests {
         assert!(log.read_range(5000, 6000).is_empty());
     }
 
-    #[test]
-    fn test_drop_safety() {
-        drop(SegLog::new());
+    #[tokio::test]
+    async fn test_drop_safety() {
+        drop(SegLog::new("test_group".to_string()));
 
-        let mut log = SegLog::new();
+        let mut log = SegLog::new("test_group".to_string());
         for _ in 0..300 {
-            log.append(1, &vec![0u8; 2000]).unwrap();
+            log.append(1, &vec![0u8; 2000]).await.unwrap();
         }
         log.trim(200);
         drop(log);
@@ -359,6 +573,8 @@ pub enum LogError {
     EntryNotFound,
     AllocationFailed,
     MaxSegmentsReached,
+    WriteLockUnavailable,
+    SnapshotFailed(String),
 }
 impl std::fmt::Display for LogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -368,6 +584,10 @@ impl std::fmt::Display for LogError {
             LogError::EntryNotFound => write!(f, "entry not found"),
             LogError::AllocationFailed => write!(f, "failed to allocate memory for segment"),
             LogError::MaxSegmentsReached => write!(f, "maximum segments reached"),
+            LogError::WriteLockUnavailable => {
+                write!(f, "write lock is currently held by another operation")
+            }
+            LogError::SnapshotFailed(reason) => write!(f, "snapshot failed: {}", reason),
         }
     }
 }

@@ -24,3 +24,6 @@ clean:
 	-kill $$(cat $(SERVER_PID) 2>/dev/null) 2>/dev/null || true
 	-kill $$(cat $(CLIENT_PID) 2>/dev/null) 2>/dev/null || true
 	-rm -f $(SERVER_PID) $(CLIENT_PID)
+run:
+	@$(MAKE) run_server &
+	@$(MAKE) run_client

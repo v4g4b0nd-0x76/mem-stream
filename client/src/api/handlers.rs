@@ -1,159 +1,312 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{Json, extract::{Path,  State}, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
 use base64::Engine;
 
-use serde::{Deserialize};
+
 use serde_json::json;
 
-use crate::client::pool::{ ClientPool};
-
-#[derive(Deserialize)]
-pub struct AddEntryReq {
-    pub payload: HashMap<String, serde_json::Value>,
-}
+use crate::client::pool::ClientPool;
 
 fn encode_payload_b64(payload: &HashMap<String, serde_json::Value>) -> Vec<u8> {
     let json_str = serde_json::to_string(payload).unwrap();
-    let b64 = base64::engine::general_purpose::STANDARD.encode(json_str).into_bytes();
+    let b64 = base64::engine::general_purpose::STANDARD
+        .encode(json_str)
+        .into_bytes();
     zstd::encode_all(&b64[..], 3).unwrap()
 }
 
 fn decode_payload_b64(encoded: &[u8]) -> HashMap<String, serde_json::Value> {
     let decompressed = zstd::decode_all(encoded).unwrap();
     let b64_str = String::from_utf8(decompressed).unwrap();
-    let json_str = base64::engine::general_purpose::STANDARD.decode(b64_str).unwrap();
+    let json_str = base64::engine::general_purpose::STANDARD
+        .decode(b64_str)
+        .unwrap();
     serde_json::from_slice(&json_str).unwrap()
 }
 
-pub async fn create_group(State(pool): State<Arc<ClientPool>>, Path(name):Path<String>) -> impl IntoResponse {
+pub async fn create_group(
+    State(pool): State<Arc<ClientPool>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    match conn.conn().create_group(&name).await{
+    match conn.conn().create_group(&name).await {
         Ok(Ok(())) => (StatusCode::OK, Json(json!({"status": "group created"}))).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 pub async fn list_groups(State(pool): State<Arc<ClientPool>>) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    match conn.conn().list_groups().await{
+    match conn.conn().list_groups().await {
         Ok(Ok(groups)) => (StatusCode::OK, Json(json!({"groups": groups}))).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn drop_group(State(pool): State<Arc<ClientPool>>, Path(name):Path<String>) -> impl IntoResponse {
+pub async fn drop_group(
+    State(pool): State<Arc<ClientPool>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    match conn.conn().drop_group(&name).await{
+    match conn.conn().drop_group(&name).await {
         Ok(Ok(())) => (StatusCode::OK, Json(json!({"status": "group dropped"}))).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn group_stats(State(pool): State<Arc<ClientPool>>, Path(name):Path<String>) -> impl IntoResponse {
+pub async fn group_stats(
+    State(pool): State<Arc<ClientPool>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    match conn.conn().group_stats(&name).await{
-        Ok(Ok((entries, segments, next_id))) => (StatusCode::OK, Json(json!({"entries": entries, "segments": segments, "next_id": next_id}))).into_response(),
+    match conn.conn().group_stats(&name).await {
+        Ok(Ok((entries, segments, next_id))) => (
+            StatusCode::OK,
+            Json(json!({"entries": entries, "segments": segments, "next_id": next_id})),
+        )
+            .into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn add_entry(State(pool): State<Arc<ClientPool>>, Path(name):Path<String>, Json(req):Json<AddEntryReq>) -> impl IntoResponse {
+pub async fn add_entry(
+    State(pool): State<Arc<ClientPool>>,
+    Path(name): Path<String>,
+    Json(req): Json<HashMap<String, serde_json::Value>>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    let payload = encode_payload_b64(&req.payload);
+    let payload = encode_payload_b64(&req);
     let timestamp = chrono::Utc::now().timestamp_millis() as u64;
-    match conn.conn().add(&name, timestamp, &payload).await{
-        Ok(Ok(id)) => (StatusCode::OK, Json(json!({"status": "entry added", "id": id}))).into_response(),
+    match conn.conn().add(&name, timestamp, &payload).await {
+        Ok(Ok(id)) => (
+            StatusCode::OK,
+            Json(json!({"status": "entry added", "id": id})),
+        )
+            .into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn add_range_entries(State(pool): State<Arc<ClientPool>>, Path(name):Path<String>, Json(req):Json<Vec<AddEntryReq>>) -> impl IntoResponse {
+pub async fn add_range_entries(
+    State(pool): State<Arc<ClientPool>>,
+    Path(name): Path<String>,
+    Json(req): Json<Vec<HashMap<String, serde_json::Value>>>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    let entries: Vec<(u64, Vec<u8>)> = req.into_iter().map(|e| (chrono::Utc::now().timestamp_millis() as u64, encode_payload_b64(&e.payload))).collect();
-    let entries_ref: Vec<(u64, &[u8])> = entries.iter().map(|(ts, payload)| (*ts, payload.as_slice())).collect();
-    match conn.conn().add_range(&name, &entries_ref).await{
-        Ok(Ok((first, last))) => (StatusCode::OK, Json(json!({"status": "entries added", "first": first, "last": last}))).into_response(),
+    let entries: Vec<(u64, Vec<u8>)> = req
+        .into_iter()
+        .map(|e| {
+            (
+                chrono::Utc::now().timestamp_millis() as u64,
+                encode_payload_b64(&e),
+            )
+        })
+        .collect();
+    let entries_ref: Vec<(u64, &[u8])> = entries
+        .iter()
+        .map(|(ts, payload)| (*ts, payload.as_slice()))
+        .collect();
+    match conn.conn().add_range(&name, &entries_ref).await {
+        Ok(Ok((first, last))) => (
+            StatusCode::OK,
+            Json(json!({"status": "entries added", "first": first, "last": last})),
+        )
+            .into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn read_entry(State(pool): State<Arc<ClientPool>>, Path((name, id)):Path<(String, u64)>) -> impl IntoResponse {
+pub async fn read_entry(
+    State(pool): State<Arc<ClientPool>>,
+    Path((name, id)): Path<(String, u64)>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    match conn.conn().read(&name, id).await{
+    match conn.conn().read(&name, id).await {
         Ok(Ok((id, timestamp, payload))) => {
             let payload_decoded = decode_payload_b64(&payload);
             let utc_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp as i64);
             let tehran_tz = chrono_tz::Asia::Tehran;
             let time = match utc_dt {
-                Some(dt) => dt.with_timezone(&tehran_tz).format("%Y-%m-%d %H:%M:%S").to_string(),
+                Some(dt) => dt
+                    .with_timezone(&tehran_tz)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
                 None => "invalid timestamp".to_string(),
             };
-            (StatusCode::OK, Json(json!({"id": id, "timestamp": time, "payload": payload_decoded}))).into_response()
-        },
+            (
+                StatusCode::OK,
+                Json(json!({"id": id, "timestamp": time, "payload": payload_decoded})),
+            )
+                .into_response()
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 pub async fn read_range_entries(
     State(pool): State<Arc<ClientPool>>,
-    Path((name, start_id , end_id)): Path<(String , u64, u64)>,
-    
+    Path((name, start_id, end_id)): Path<(String, u64, u64)>,
 ) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
     match conn.conn().read_range(&name, start_id, end_id).await {
         Ok(Ok(entries)) => {
-            let entries_decoded: Vec<_> = entries.into_iter().map(|(id, timestamp, payload)| {
-                let payload_decoded = decode_payload_b64(&payload);
-                json!({"id": id, "timestamp": timestamp, "payload": payload_decoded})
-            }).collect();
+            let entries_decoded: Vec<_> = entries
+                .into_iter()
+                .map(|(id, timestamp, payload)| {
+                    let payload_decoded = decode_payload_b64(&payload);
+                    json!({"id": id, "timestamp": timestamp, "payload": payload_decoded})
+                })
+                .collect();
             (StatusCode::OK, Json(json!({"entries": entries_decoded}))).into_response()
-        },
+        }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn drop_entries(State(pool):State<Arc<ClientPool>> , Path((group,upto_id)): Path<(String, u64)>) -> impl IntoResponse {
+pub async fn drop_entries(
+    State(pool): State<Arc<ClientPool>>,
+    Path((group, upto_id)): Path<(String, u64)>,
+) -> impl IntoResponse {
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     };
-    match conn.conn().remove(&group, upto_id).await{
-        Ok(Ok(())) => (StatusCode::OK, Json(json!({"status": format!("entries dropped up to id {}", upto_id)}))).into_response(),
+    match conn.conn().remove(&group, upto_id).await {
+        Ok(Ok(())) => (
+            StatusCode::OK,
+            Json(json!({"status": format!("entries dropped up to id {}", upto_id)})),
+        )
+            .into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 

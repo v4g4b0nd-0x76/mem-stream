@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use axum::{Router, routing::{delete, get, post}};
+use axum::{
+    Router,
+    routing::{delete, get, post},
+};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{api::handlers::*, client::pool::ClientPool};
@@ -15,12 +18,20 @@ pub fn build_router(pool: Arc<ClientPool>) -> Router {
         .route("/groups/{name}/entries", post(add_entry))
         .route("/groups/{name}/entries/batch", post(add_range_entries))
         .route("/groups/{name}/entries/single/{id}", get(read_entry))
-        .route("/groups/{name}/entries/range/{start_id}/{end_id}", get(read_range_entries))
-        .route("/groups/{name}/entries/trim/{upto_id}", delete(drop_entries))
+        .route(
+            "/groups/{name}/entries/range/{start_id}/{end_id}",
+            get(read_range_entries),
+        )
+        .route(
+            "/groups/{name}/entries/trim/{upto_id}",
+            delete(drop_entries),
+        )
         .with_state(pool);
 
-    Router::new()
-        .merge(health_route)
-        .merge(api_router)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+    Router::new().merge(health_route).merge(api_router).layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    )
 }
