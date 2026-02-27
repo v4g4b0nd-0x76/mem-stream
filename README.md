@@ -13,6 +13,8 @@ Tokio simple Tcp connection for p2p communication;
 
 Snapshot segments when a reallocation/new segment applies. and load snapshot for seg_logs base on their identifier of any snapshot exists.
 
+LRU in group wrapper level for better performance and less segment access.
+
 ## Client
 
 Custom connection pool for connections to server using its own protocol

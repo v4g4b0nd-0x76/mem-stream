@@ -38,11 +38,11 @@ pub struct SegLog {
 unsafe impl Send for SegLog {}
 unsafe impl Sync for SegLog {}
 #[derive(bitcode::Encode, bitcode::Decode, PartialEq, Debug)]
-struct Entry {
-    id: u64,          // 8 bytes
-    timestamp: u64,   // 8 bytes
-    len: usize,       // 4 bytes
-    payload: Vec<u8>, // variable length
+pub struct LogEntry {
+    pub id: u64,          // 8 bytes
+    pub timestamp: u64,   // 8 bytes
+    pub len: usize,       // 4 bytes
+    pub payload: Vec<u8>, // variable length
 }
 impl SegLog {
     pub fn new(identifier: String) -> Self {
@@ -218,7 +218,7 @@ impl SegLog {
         results
     }
 
-    pub fn trim(&mut self, cutoff_id: u64) {
+    pub fn trim(&mut self, cutoff_id: u64) -> Vec<u64> {
         let to_remove: Vec<u64> = self.idx.range(..cutoff_id).map(|(&id, _)| id).collect();
 
         for id in &to_remove {
@@ -235,6 +235,7 @@ impl SegLog {
                 }
             }
         }
+        to_remove
     }
     #[allow(dead_code)]
 
@@ -270,10 +271,10 @@ impl SegLog {
         let pth = PathBuf::from(format!("{}/{}_snapshot_{}.bin", dir, grp, ts));
         let meta_pth = PathBuf::from(format!("{}/{}_snapshot_{}.meta.json", dir, grp, ts));
 
-        let mut entries: Vec<Entry> = Vec::with_capacity(self.idx.len());
+        let mut entries: Vec<LogEntry> = Vec::with_capacity(self.idx.len());
         for (&id, _) in self.idx.iter() {
             if let Ok((_, timestamp, payload)) = self.read(id) {
-                entries.push(Entry {
+                entries.push(LogEntry {
                     id,
                     timestamp,
                     len: payload.len(),
@@ -352,7 +353,7 @@ impl SegLog {
         };
 
         let data = tokio::fs::read(&snapshot_pth).await?;
-        let entries: Vec<Entry> = bitcode::decode(&data)?;
+        let entries: Vec<LogEntry> = bitcode::decode(&data)?;
         for entry in entries {
             self.append_with_id(entry.id, entry.timestamp, &entry.payload)
                 .await

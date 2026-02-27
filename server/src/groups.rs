@@ -1,8 +1,11 @@
 use futures::TryFutureExt;
 use tokio::fs::File;
 
-use crate::seg_log::{LogError, SegLog};
-use std::{collections::HashMap, path::PathBuf};
+use crate::{
+    lru::{LRU, build_key},
+    seg_log::{LogEntry, LogError, SegLog},
+};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 #[derive(Debug)]
 pub enum GroupError {
     GroupNotFound(String),
@@ -28,8 +31,27 @@ pub struct GroupStats {
     pub total_segments: usize,
     pub next_id: u64,
 }
+
+struct Group {
+    name: String,
+    log: SegLog,
+    lru_cache: LRU<u64, LogEntry>,
+}
+impl Group {
+    fn add_cache(&mut self, id: u64, timestamp: u64, payload: &[u8]) {
+        // TODO: make it group implementation
+        let entry = LogEntry {
+            id: id,
+            timestamp: timestamp,
+            len: payload.len(),
+            payload: payload.to_vec(),
+        };
+        let key = build_key(&self.name, id);
+        self.lru_cache.insert(key, entry);
+    }
+}
 pub struct GroupManager {
-    groups: HashMap<String, SegLog>,
+    groups: HashMap<String, Group>,
 }
 
 impl GroupManager {
@@ -47,7 +69,12 @@ impl GroupManager {
             return Err(GroupError::GroupAlreadyExists(name.to_string()));
         }
         let log = SegLog::new(name.to_string());
-        self.groups.insert(name.to_string(), log);
+        let group = Group {
+            name: name.to_string(),
+            log,
+            lru_cache: LRU::new(100_000, Duration::from_secs(30)),
+        };
+        self.groups.insert(name.to_string(), group);
         self.snapshot_group(name)
             .await
             .expect(&format!("failed to snapshot group '{}'", name));
@@ -68,11 +95,13 @@ impl GroupManager {
         timestamp: u64,
         payload: &[u8],
     ) -> Result<u64, GroupError> {
-        let log = self
+        let grp = self
             .groups
             .get_mut(group)
             .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
-        Ok(log.append(timestamp, payload).await?)
+        let id = grp.log.append(timestamp, payload).await?;
+        grp.add_cache(id, timestamp, payload);
+        Ok(id)
     }
 
     pub async fn add_range(
@@ -80,7 +109,7 @@ impl GroupManager {
         group: &str,
         entries: &[(u64, &[u8])], // (timestamp, payload)
     ) -> Result<(u64, u64), GroupError> {
-        let log = self
+        let grp = self
             .groups
             .get_mut(group)
             .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
@@ -89,40 +118,65 @@ impl GroupManager {
             return Err(GroupError::LogError(LogError::EntryNotFound));
         }
 
-        let first_id = log.append(entries[0].0, entries[0].1).await?;
+        let first_id = grp.log.append(entries[0].0, entries[0].1).await?;
+        grp.add_cache(first_id, entries[0].0, entries[0].1);
         let mut last_id = first_id;
         for &(ts, payload) in &entries[1..] {
-            last_id = log.append(ts, payload).await?;
+            let id = grp.log.append(ts, payload).await?;
+            grp.add_cache(id, ts, payload);
+            last_id = id;
         }
         Ok((first_id, last_id))
     }
-    pub fn read(&self, group: &str, id: u64) -> Result<(u64, u64, Vec<u8>), GroupError> {
-        let log = self
+    pub fn read(&mut self, group: &str, id: u64) -> Result<(u64, u64, Vec<u8>), GroupError> {
+        let grp = self
             .groups
-            .get(group)
+            .get_mut(group)
             .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
-        Ok(log.read(id)?)
+        if let Some(cached) = grp.lru_cache.get(&build_key(group, id)) {
+            return Ok((cached.id, cached.timestamp, cached.payload.clone()));
+        }
+        Ok(grp.log.read(id)?)
     }
 
     pub fn read_range(
-        &self,
+        &mut self,
         group: &str,
         start: u64,
         end: u64,
     ) -> Result<Vec<(u64, u64, Vec<u8>)>, GroupError> {
-        let log = self
-            .groups
-            .get(group)
-            .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
-        Ok(log.read_range(start, end))
-    }
-
-    pub fn remove(&mut self, group: &str, up_to_id: u64) -> Result<(), GroupError> {
-        let log = self
+        let grp = self
             .groups
             .get_mut(group)
             .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
-        log.trim(up_to_id);
+
+        let range = end - start + 1;
+        let mut cached: Vec<(u64, u64, Vec<u8>)> = Vec::with_capacity(range as usize);
+        let mut all_cached = true;
+        for id in start..=end {
+            if let Some(entry) = grp.lru_cache.get(&build_key(group, id)) {
+                cached.push((entry.id, entry.timestamp, entry.payload.clone()));
+            } else {
+                all_cached = false;
+                break;
+            }
+        }
+        if all_cached && cached.len() as u64 == range {
+            return Ok(cached);
+        } else {
+            Ok(grp.log.read_range(start, end))
+        }
+    }
+
+    pub fn remove(&mut self, group: &str, up_to_id: u64) -> Result<(), GroupError> {
+        let grp = self
+            .groups
+            .get_mut(group)
+            .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
+        let to_remove = grp.log.trim(up_to_id);
+        for id in &to_remove {
+            grp.lru_cache.remove(&build_key(group, *id));
+        }
         Ok(())
     }
 
@@ -131,14 +185,14 @@ impl GroupManager {
     }
 
     pub fn group_stats(&self, group: &str) -> Result<GroupStats, GroupError> {
-        let log = self
+        let grp = self
             .groups
             .get(group)
             .ok_or_else(|| GroupError::GroupNotFound(group.to_owned()))?;
         Ok(GroupStats {
-            total_entries: log.total_entries(),
-            total_segments: log.total_segments(),
-            next_id: log.next_id(),
+            total_entries: grp.log.total_entries(),
+            total_segments: grp.log.total_segments(),
+            next_id: grp.log.next_id(),
         })
     }
     async fn snapshot_group(&self, group: &str) -> anyhow::Result<()> {
@@ -205,13 +259,15 @@ impl GroupManager {
         let group_names = self.load_group_names().await?;
         for grp in group_names {
             let grp = grp.clone();
-            let log = self.groups.get_mut(&grp).ok_or_else(|| {
+            let group = self.groups.get_mut(&grp).ok_or_else(|| {
                 anyhow::anyhow!(
                     "group '{}' listed in snapshot but not found in manager",
                     grp
                 )
             })?;
-            log.load_snapshot()
+            group
+                .log
+                .load_snapshot()
                 .map_err(|e| anyhow::anyhow!("failed to load snapshot for group '{}': {}", grp, e))
                 .await?;
         }

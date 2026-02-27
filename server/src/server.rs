@@ -95,7 +95,7 @@ async fn handle_command(
             }
         }
         Command::Read { group, id } => {
-            let mgr = manager.read().await;
+            let mut mgr = manager.write().await;
             match mgr.read(group, id) {
                 Result::<(u64, u64, Vec<u8>), GroupError>::Ok((entry_id, ts, payload)) => {
                     rb.ok_entry(entry_id, ts, &payload).to_vec()
@@ -106,7 +106,7 @@ async fn handle_command(
             }
         }
         Command::ReadRange { group, start, end } => {
-            let mgr = manager.read().await;
+            let mut mgr = manager.write().await;
             match mgr.read_range(group, start, end) {
                 Result::<Vec<(u64, u64, Vec<u8>)>, GroupError>::Ok(entries) => {
                     rb.ok_entries(&entries).to_vec()
